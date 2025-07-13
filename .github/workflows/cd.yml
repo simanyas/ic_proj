@@ -1,0 +1,17 @@
+name: CD Pipeline
+# Only trigger, when the build workflow succeeded i.e. CI Pipeline
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types:
+    - completed
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+    - name: Pull Docker Image
+      run: sudo docker pull ${{secrets.DOCKER_UNAME}}/ic:latest
+    - name: Delete Old Docker Container
+      run: sudo docker rm -f ic-container || true
+    - name: Run Docker Container
+      run: sudo docker run -it -d -p 8001:8001 --name ic-container ${{secrets.DOCKER_UNAME}}/ic:latest
