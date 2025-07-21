@@ -56,6 +56,7 @@ output_img = gr.Image(label="Image")
 caption_us = gr.Textbox(label="Model under evaluation")
 yolo_res = gr.Textbox(label="Yolo result")
 yolo_gemini_caption = gr.Textbox(label="Caption suggestion from expert model")
+#done_with_rl_mf_btn = gr.Button()
 
 # Create Gradio interface object
 iface = gr.Interface(fn = run_rlmf,
@@ -65,6 +66,7 @@ iface = gr.Interface(fn = run_rlmf,
                          description="YOLO/Gemini Feedback",
                          allow_flagging='never',
                          )
+#done_with_rl_mf_btn.onClick()
 
 # Mount gradio interface object on FastAPI app at endpoint = '/'
 app = gr.mount_gradio_app(app, iface, path="/")
