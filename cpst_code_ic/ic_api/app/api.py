@@ -6,8 +6,12 @@ sys.path.append(str(root))
 
 import json
 from typing import Any
+import re
 
+from PIL import Image
+import cv2
 import numpy as np
+import gradio as gr
 from fastapi import APIRouter, HTTPException, Body
 from fastapi.encoders import jsonable_encoder
 #from ic_model.config.core import TRAINED_MODEL_DIR, PRED_DIR
@@ -15,13 +19,33 @@ from fastapi.encoders import jsonable_encoder
 #from mp_model import __version__ as model_version
 from tensorflow import keras
 from tensorflow.keras import layers
+from tensorflow.keras.models import save_model, load_model
 from app import __version__, schemas
 from app.config import settings
 from keras.layers import TextVectorization
+from keras.applications import efficientnet
 import tensorflow as tf
 from typing import Dict, List
 import re
 import os
+import huggingface_hub
+from huggingface_hub import from_pretrained_keras
+from keras import saving
+from google import genai
+from google.genai import types
+
+# Path to the images
+IMAGES_PATH = "Flicker8k_Dataset"
+# Initialize the Gemini client with your API key
+client = genai.Client(api_key="AIzaSyAeMdaHga2nDhMK9wCBOVeCRbWJStmDaK0")
+
+# Desired image dimensions
+IMAGE_SIZE = (299, 299)
+
+# Vocabulary size
+VOCAB_SIZE = 10000
+# Fixed length allowed for any sequence
+SEQ_LENGTH = 25
 
 # Project Directories
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -32,23 +56,9 @@ EMBED_DIM = 512
 
 # Per-layer units in the feed-forward network
 FF_DIM = 512
-print("Extracting data")
-command_wget_1 = 'wget -q https://github.com/jbrownlee/Datasets/releases/download/Flickr8k/Flickr8k_Dataset.zip'
-command_wget_2 = 'wget -q https://github.com/jbrownlee/Datasets/releases/download/Flickr8k/Flickr8k_text.zip'
-command_3 = 'unzip -qq ' + str(ROOT) + "/" + 'Flickr8k_Dataset.zip -d ' + str(DATASET_DIR_APP)
-command_4 = 'unzip -qq ' + str(ROOT) + "/" + 'Flickr8k_text.zip -d ' + str(DATASET_DIR_APP)
-#command_5 = 'rm Flickr8k_Dataset.zip Flickr8k_text.zip'
-print("Download the files")
-#os.system(command_wget_1)
-#os.system(command_wget_2)
-print("unzip dataset")
-#os.system(command_3)
-print("unzip text")
-#os.system(command_4)
-print("remove zip files")
-#os.system(command_5)
-print("Done extracting data")
-
+BATCH_SIZE = 64
+EPOCHS = 1
+AUTOTUNE = tf.data.AUTOTUNE
 model_version = "0.0.1"
 # Vocabulary size
 VOCAB_SIZE = 10000
@@ -72,6 +82,139 @@ vectorization = TextVectorization(
         output_sequence_length=SEQ_LENGTH,
         standardize=custom_standardization,
     )
+
+def load_captions_data(filename):
+    """Loads captions (text) data and maps them to corresponding images.
+
+    Args:
+        filename: Path to the text file containing caption data.
+
+    Returns:
+        caption_mapping: Dictionary mapping image names and the corresponding captions
+        text_data: List containing all the available captions
+    """
+
+    with open(filename) as caption_file:
+        caption_data = caption_file.readlines()
+        caption_mapping = {}
+        text_data = []
+        images_to_skip = set()
+
+        for line in caption_data:
+            line = line.rstrip("\n")
+            # Image name and captions are separated using a tab
+            img_name, caption = line.split("\t")
+
+            # Each image is repeated five times for the five different captions.
+            # Each image name has a suffix `#(caption_number)`
+            img_name = img_name.split("#")[0]
+            img_name = os.path.join(IMAGES_PATH, img_name.strip())
+
+            # We will remove caption that are either too short to too long
+            tokens = caption.strip().split()
+
+            if len(tokens) < 5 or len(tokens) > SEQ_LENGTH:
+                images_to_skip.add(img_name)
+                continue
+
+            if img_name.endswith("jpg") and img_name not in images_to_skip:
+                # We will add a start and an end token to each caption
+                caption = "<start> " + caption.strip() + " <end>"
+                text_data.append(caption)
+
+                if img_name in caption_mapping:
+                    caption_mapping[img_name].append(caption)
+                else:
+                    caption_mapping[img_name] = [caption]
+
+        for img_name in images_to_skip:
+            if img_name in caption_mapping:
+                del caption_mapping[img_name]
+
+        return caption_mapping, text_data
+
+
+def train_val_split(caption_data, train_size=0.8, shuffle=True):
+    """Split the captioning dataset into train and validation sets.
+
+    Args:
+        caption_data (dict): Dictionary containing the mapped caption data
+        train_size (float): Fraction of all the full dataset to use as training data
+        shuffle (bool): Whether to shuffle the dataset before splitting
+
+    Returns:
+        Traning and validation datasets as two separated dicts
+    """
+
+    # 1. Get the list of all image names
+    all_images = list(caption_data.keys())
+
+    # 2. Shuffle if necessary
+    if shuffle:
+        np.random.shuffle(all_images)
+
+    # 3. Split into training and validation sets
+    train_size = int(len(caption_data) * train_size)
+
+    training_data = {
+        img_name: caption_data[img_name] for img_name in all_images[:train_size]
+    }
+    print(training_data)
+    validation_data = {
+        img_name: caption_data[img_name] for img_name in all_images[train_size:]
+    }
+
+    # 4. Return the splits
+    return training_data, validation_data
+
+def decode_and_resize(img_path):
+    img = tf.io.read_file(img_path)
+    img = tf.image.decode_jpeg(img, channels=3)
+    img = tf.image.resize(img, IMAGE_SIZE)
+    img = tf.image.convert_image_dtype(img, tf.float32)
+    return img
+
+def process_input(img_path, captions):
+    return decode_and_resize(img_path), vectorization(captions)
+
+def make_dataset(images, captions):
+    dataset = tf.data.Dataset.from_tensor_slices((images, captions))
+    dataset = dataset.shuffle(BATCH_SIZE * 8)
+    dataset = dataset.map(process_input, num_parallel_calls=AUTOTUNE)
+    dataset = dataset.batch(BATCH_SIZE).prefetch(AUTOTUNE)
+    return dataset
+
+print("Extracting data")
+command_wget_1 = 'wget -q https://github.com/jbrownlee/Datasets/releases/download/Flickr8k/Flickr8k_Dataset.zip'
+command_wget_2 = 'wget -q https://github.com/jbrownlee/Datasets/releases/download/Flickr8k/Flickr8k_text.zip'
+command_3 = 'unzip -qq ' + str(ROOT) + "/" + 'Flickr8k_Dataset.zip -d ' + str(ROOT)
+command_4 = 'unzip -qq ' + str(ROOT) + "/" + 'Flickr8k_text.zip -d ' + str(DATASET_DIR_APP)
+#command_5 = 'rm Flickr8k_Dataset.zip Flickr8k_text.zip'
+print("Download the files")
+#os.system(command_wget_1)
+#os.system(command_wget_2)
+print("unzip dataset")
+#os.system(command_3)
+print("unzip text")
+#os.system(command_4)
+print("remove zip files")
+#os.system(command_5)
+print("Done extracting data")
+# Pass the list of images and the list of corresponding captions
+# Load the dataset
+# For the training/validation set, only first caption is used
+captions_mapping, text_data = load_captions_data(str(DATASET_DIR_APP) + "/Flickr8k_text/" + "Flickr8k.token.txt")
+vectorization.adapt(text_data)
+
+# Split the dataset into training and validation sets
+train_data, valid_data = train_val_split(captions_mapping)
+print("Number of training samples: ", len(train_data))
+print("Number of validation samples: ", len(valid_data))
+list_of_v_images = list(valid_data.keys())
+list_of_v_captions = list(valid_data.values())
+train_dataset = make_dataset(list(train_data.keys()), list(train_data.values()))
+valid_dataset = make_dataset(list_of_v_images, list_of_v_captions)
+
 # Data augmentation for image data
 image_augmentation = keras.Sequential(
     [
@@ -80,13 +223,6 @@ image_augmentation = keras.Sequential(
         layers.RandomContrast(0.3),
     ]
 )
-
-def decode_and_resize(img_path):
-    img = tf.io.read_file(img_path)
-    img = tf.image.decode_jpeg(img, channels=3)
-    img = tf.image.resize(img, IMAGE_SIZE)
-    img = tf.image.convert_image_dtype(img, tf.float32)
-    return img
 
 vocab = vectorization.get_vocabulary()
 index_lookup = dict(zip(range(len(vocab)), vocab))
@@ -107,7 +243,7 @@ def get_cnn_model():
     cnn_model = keras.models.Model(base_model.input, base_model_out)
     return cnn_model
 
-@keras.saving.register_keras_serializable()
+
 class TransformerEncoderBlock(layers.Layer):
     def __init__(self, embed_dim, dense_dim, num_heads, **kwargs):
         super().__init__(**kwargs)
@@ -135,7 +271,7 @@ class TransformerEncoderBlock(layers.Layer):
         out_1 = self.layernorm_2(inputs + attention_output_1)
         return out_1
 
-@keras.saving.register_keras_serializable()
+
 class PositionalEmbedding(layers.Layer):
     def __init__(self, sequence_length, vocab_size, embed_dim, **kwargs):
         super().__init__(**kwargs)
@@ -161,7 +297,7 @@ class PositionalEmbedding(layers.Layer):
     def compute_mask(self, inputs, mask=None):
         return tf.math.not_equal(inputs, 0)
 
-@keras.saving.register_keras_serializable()
+
 class TransformerDecoderBlock(layers.Layer):
     def __init__(self, embed_dim, ff_dim, num_heads, **kwargs):
         super().__init__(**kwargs)
@@ -244,7 +380,7 @@ class TransformerDecoderBlock(layers.Layer):
         )
         return tf.tile(mask, mult)
 
-@keras.saving.register_keras_serializable()
+
 class ImageCaptioningModel(keras.Model):
     def __init__(
         self,
@@ -404,6 +540,16 @@ class ImageCaptioningModel(keras.Model):
         })
         return config
 
+cnn_model = get_cnn_model()
+encoder = TransformerEncoderBlock(embed_dim=EMBED_DIM, dense_dim=FF_DIM, num_heads=1)
+decoder = TransformerDecoderBlock(embed_dim=EMBED_DIM, ff_dim=FF_DIM, num_heads=2)
+caption_model = ImageCaptioningModel(
+    cnn_model=cnn_model,
+    encoder=encoder,
+    decoder=decoder,
+    image_aug=image_augmentation,
+)
+
 # Define the loss function
 cross_entropy = keras.losses.SparseCategoricalCrossentropy(
     from_logits=False,
@@ -415,7 +561,6 @@ early_stopping = keras.callbacks.EarlyStopping(patience=3, restore_best_weights=
 
 
 # Learning Rate Scheduler for the optimizer
-@keras.saving.register_keras_serializable()
 class LRSchedule(keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, post_warmup_learning_rate, warmup_steps):
         super().__init__()
@@ -438,7 +583,7 @@ class LRSchedule(keras.optimizers.schedules.LearningRateSchedule):
             "post_warmup_learning_rate": self.post_warmup_learning_rate,
             "warmup_steps": self.warmup_steps,
         }
-
+'''
 cnn_model = get_cnn_model()
 encoder = TransformerEncoderBlock(embed_dim=EMBED_DIM, dense_dim=FF_DIM, num_heads=1)
 decoder = TransformerDecoderBlock(embed_dim=EMBED_DIM, ff_dim=FF_DIM, num_heads=2)
@@ -449,12 +594,37 @@ reloaded_model = ImageCaptioningModel(
     decoder=decoder,
     image_aug=image_augmentation
 )
-
-command_6 = 'unzip -qq ' + str(ROOT) + "/" + 'ic_model.zip -d ' + str(ROOT) + "/" + "ic__model_output_v0.0.1.keras"
+'''
+#command_6 = 'unzip -qq ' + str(ROOT) + "/" + 'ic_model.zip -d ' + str(ROOT) + "/"
 #os.system(command_6)
-reload_path = str(ROOT / "ic__model_output_v0.0.1.keras")
-reloaded_model = tf.keras.models.load_model(reload_path)
+#reload_path = str(ROOT / "ic__model_output_v0.0.1.keras")
+#reloaded_model = tf.keras.models.load_model(reload_path)
+
+#reloaded_model = from_pretrained_keras("sindsub/ic_model")
 #reloaded_model = tf.saved_model.load(reload_path)
+
+# Create a learning rate schedule
+num_train_steps = len(train_dataset) * EPOCHS
+num_warmup_steps = num_train_steps // 15
+lr_schedule = LRSchedule(post_warmup_learning_rate=1e-4, warmup_steps=num_warmup_steps)
+caption_model.compile(optimizer=keras.optimizers.Adam(lr_schedule), loss=cross_entropy)
+
+#sess = tf.Session()
+#sess.run(it.initializer)
+#sess.run(tf.tables_initializer()) 
+#tf.keras.backend.set_session(sess)
+
+# Fit the model
+caption_model.fit(
+    train_dataset,
+    epochs=EPOCHS,
+    validation_data=valid_dataset,
+    callbacks=[early_stopping],
+)
+vocab = vectorization.get_vocabulary()
+index_lookup = dict(zip(range(len(vocab)), vocab))
+max_decoded_sentence_length = SEQ_LENGTH - 1
+valid_images = list(valid_data.keys())
 
 def generate_caption(test_image=""):
     # Select a random image from the validation dataset
@@ -469,17 +639,17 @@ def generate_caption(test_image=""):
 
     # Pass the image to the CNN
     img = tf.expand_dims(sample_img, 0)
-    img = reloaded_model.cnn_model(img)
+    img = caption_model.cnn_model(img)
 
     # Pass the image features to the Transformer encoder
-    encoded_img = reloaded_model.encoder(img, training=False)
+    encoded_img = caption_model.encoder(img, training=False)
 
     # Generate the caption using the Transformer decoder
     decoded_caption = "<start> "
     for i in range(max_decoded_sentence_length):
         tokenized_caption = vectorization([decoded_caption])[:, :-1]
         mask = tf.math.not_equal(tokenized_caption, 0)
-        predictions = reloaded_model.decoder(
+        predictions = caption_model.decoder(
             tokenized_caption, encoded_img, training=False, mask=mask
         )
         sampled_token_index = np.argmax(predictions[0, i, :])
@@ -493,12 +663,88 @@ def generate_caption(test_image=""):
     print("Predicted Caption: ", decoded_caption)
     return decoded_caption
 
+
 def make_prediction(test_image) -> dict:
     predicted_caption = generate_caption(test_image)
     errors = False
     results = {"predictions": predicted_caption, "version": _version, "errors": errors}
     print("Results:", results, predicted_caption)
     return results
+
+def read_image(filename=None):
+    # Read image with opencv
+    image = cv2.cvtColor(cv2.imread(filename), cv2.COLOR_BGR2RGB)
+    # Extract width and height
+    h, w = image.shape[:2]
+    # # Read the image using OpenCV and convert it into the PIL format
+    return Image.fromarray(image), w, h
+
+
+def clean_results(results):
+    """Clean the results for visualization."""
+    # Use regex to find the JSON array within the string
+    match = re.search(r'\[.*?\]', results, re.DOTALL)
+    if match:
+        return match.group(0)
+    return ""
+
+def inference(image, prompt, temp=0.5):
+    """
+    Performs inference using Google Gemini 2.5 Pro Experimental model.
+
+    Args:
+        image (str or genai.types.Blob): The image input, either as a base64-encoded string or Blob object.
+        prompt (str): A text prompt to guide the model's response.
+        temp (float, optional): Sampling temperature for response randomness. Default is 0.5.
+
+    Returns:
+        str: The text response generated by the Gemini model based on the prompt and image.
+    """
+    response = client.models.generate_content(
+        model="gemini-2.5-flash-preview-05-20",  # or "gemini-2.5-pro-exp-03-25"
+        contents=[prompt, image],  # Provide both the text prompt and image as input
+        config=types.GenerateContentConfig(
+            temperature=temp,  # Controls creativity vs. determinism in output
+        ),
+    )
+    return response.text  # Return the generated textual response
+
+def yolo_result(image, caption_us):
+    prompt = """
+             Detect the 2d bounding box around:
+             """
+    # Fixed, plotting function depends on this.
+    output_prompt = "Return just box_2d and labels, no additional text."
+    gemini_caption_prompt = """caption?"""
+    image, w, h = read_image(image, caption_us)
+    if image is not None:
+      print("Looking for " + caption_us)
+      results = inference(image, prompt + caption_us + output_prompt)
+      cln_results_str = clean_results(results)
+      #print("Raw results:", results) # Added for debugging
+      #print("Cleaned results string:", cln_results_str) # Added for debugging
+      try:
+        cln_results = json.loads(cln_results_str)  # Clean results, list convert
+        if len(cln_results) == 0:
+          print("Kidding")
+          yolo_res = "Kidding"
+          yolo_gemini_caption = inference(image, gemini_caption_prompt)
+        else:
+          print("Real")
+          yolo_res = "Real"
+      except json.JSONDecodeError as e:
+        #print(f"Error decoding JSON: {e}")
+        #print(f"Raw results after cleaning attempt: {cln_results_str}") # Added for debugging
+        print("Exception, possibly exhausted tokens")
+    return yolo_res, yolo_gemini_caption
+
+def run_rlmf(image, question):
+    if image is None:
+        print("No image provided.Selecting random")
+        image = np.random.choice(list_of_v_images)
+    image = Image.fromarray(image).convert("RGB")
+    caption_us = generate_caption(image)
+    return image, caption_us, yolo_result(image, caption_us)
 
 @api_router.get("/health", response_model=schemas.Health, status_code=200)
 def health() -> dict:
