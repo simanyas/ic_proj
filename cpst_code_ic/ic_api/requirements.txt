@@ -11,3 +11,21 @@ huggingface_hub
 gradio
 google-genai
 ultralytics
+unsloth
+bitsandbytes 
+accelerate 
+xformers==0.0.29.post3 
+peft 
+trl 
+triton 
+cut_cross_entropy 
+unsloth_zoo
+sentencepiece
+protobuf 
+datasets>=3.4.1,<4.0.0 
+huggingface_hub 
+hf_transfer
+spaces
+
+# Directly using keras file instead of whl
+#ic_model-0.0.1-py3-none-any.whl
