@@ -3,10 +3,11 @@ fastapi>=0.64.0,<1.0.0
 requests>=2.23.0,<2.24.0
 pydantic
 pydantic-settings
-tensorflow==2.18.0
-
-# Directly using keras file instead of whl
-#ic_model-0.0.1-py3-none-any.whl
-
-# If uploded your package in PyPI then use the given below
-#bikeshare-model==0.0.1
+tensorflow>=2.16.2
+tensorflow-probability
+tf-models-official
+pytest>=7.2.0,<8.0.0
+huggingface_hub
+gradio
+google-genai
+ultralytics
