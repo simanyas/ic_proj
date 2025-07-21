@@ -892,6 +892,14 @@ def run_rlmf(image):
     caption_us = generate_caption(image)
     return image, caption_us, yolo_result(image, caption_us)
 
+def done_with_rl_mf():
+    c1 = "git add rlhf_rlmf.txt"
+    c2 = "git commit -m \"adding rlhf_rlmf.txt\""
+    c3 = "git push -u https://simanyas:<PAT>@github.com/simanyas/ic_proj.git" main
+    os.system(c1)
+    os.system(c2)
+    os.system(c3)
+
 @api_router.get("/health", response_model=schemas.Health, status_code=200)
 def health() -> dict:
     """
