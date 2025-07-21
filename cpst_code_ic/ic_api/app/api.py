@@ -33,6 +33,11 @@ from huggingface_hub import from_pretrained_keras
 from keras import saving
 from google import genai
 from google.genai import types
+from unsloth.trainer import UnslothVisionDataCollator
+from trl import SFTTrainer, SFTConfig
+from transformers import TextStreamer
+from unsloth import FastVisionModel # FastLanguageModel for LLMs
+import torch
 
 # Path to the images
 IMAGES_PATH = "Flicker8k_Dataset"
@@ -82,6 +87,22 @@ vectorization = TextVectorization(
         output_sequence_length=SEQ_LENGTH,
         standardize=custom_standardization,
     )
+
+# Search all the image names in rlhf_rlmf.txt
+rlhf_rlmf_file_names = []
+def list_rlhf_rlmf_file_names():
+  with open("rlhf_rlmf.txt", "r") as f:
+    lines = f.readlines()
+    for line in lines:
+            l = line.rstrip("\n")
+            # Image name and captions are separated using a tab
+            img_name, caption = l.split("\t")
+            # Each image is repeated five times for the five different captions.
+            # Each image name has a suffix `#(caption_number)`
+            img_name = img_name.split("#")[0]
+            if img_name not in rlhf_rlmf_file_names:
+              rlhf_rlmf_file_names.append(img_name)
+list_rlhf_rlmf_file_names()
 
 def load_captions_data(filename):
     """Loads captions (text) data and maps them to corresponding images.
@@ -188,7 +209,7 @@ print("Extracting data")
 command_wget_1 = 'wget -q https://github.com/jbrownlee/Datasets/releases/download/Flickr8k/Flickr8k_Dataset.zip'
 command_wget_2 = 'wget -q https://github.com/jbrownlee/Datasets/releases/download/Flickr8k/Flickr8k_text.zip'
 command_3 = 'unzip -qq ' + str(ROOT) + "/" + 'Flickr8k_Dataset.zip -d ' + str(ROOT)
-command_4 = 'unzip -qq ' + str(ROOT) + "/" + 'Flickr8k_text.zip -d ' + str(DATASET_DIR_APP)
+command_4 = 'unzip -qq ' + str(ROOT) + "/" + 'Flickr8k_text.zip -d ' + str(ROOT)
 #command_5 = 'rm Flickr8k_Dataset.zip Flickr8k_text.zip'
 print("Download the files")
 #os.system(command_wget_1)
@@ -203,7 +224,36 @@ print("Done extracting data")
 # Pass the list of images and the list of corresponding captions
 # Load the dataset
 # For the training/validation set, only first caption is used
-captions_mapping, text_data = load_captions_data(str(DATASET_DIR_APP) + "/Flickr8k_text/" + "Flickr8k.token.txt")
+
+# Prepare new version of data
+v = 1.0
+def prepare_new_data_version():
+  global v
+  v += 0.1
+  with open("Flickr8k.token_" + str(v) + ".txt", "w") as f:
+    with open("Flickr8k.token.txt", "r") as f2:
+      lines = f2.readlines()
+      for line in lines:
+            l = line.rstrip("\n")
+            # Image name and captions are separated using a tab
+            img_name, caption = l.split("\t")
+            # Each image is repeated five times for the five different captions.
+            # Each image name has a suffix `#(caption_number)`
+            img_name = img_name.split("#")[0]
+            if img_name not in rlhf_rlmf_file_names:
+              f.write(line)
+    f2.close()
+    with open("rlhf_rlmf.txt", "r") as f1:
+      rlines = f1.readlines()
+      for rline in rlines:
+        f.write(rline)
+    f1.close()
+  f.close()
+
+# To be called during RLHF/RLMF workflow actions to run fine-tuning dynamically
+prepare_new_data_version()          
+
+captions_mapping, text_data = load_captions_data(str(ROOT) + "/Flickr8k_text/" + "Flickr8k.token_" + str(v) + ".txt")
 vectorization.adapt(text_data)
 
 # Split the dataset into training and validation sets
@@ -214,6 +264,135 @@ list_of_v_images = list(valid_data.keys())
 list_of_v_captions = list(valid_data.values())
 train_dataset = make_dataset(list(train_data.keys()), list(train_data.values()))
 valid_dataset = make_dataset(list_of_v_images, list_of_v_captions)
+
+# 4bit pre quantized models we support for 4x faster downloading + no OOMs.
+fourbit_models = [
+    "unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit", # Llama 3.2 vision support
+    "unsloth/Llama-3.2-11B-Vision-bnb-4bit",
+    "unsloth/Llama-3.2-90B-Vision-Instruct-bnb-4bit", # Can fit in a 80GB card!
+    "unsloth/Llama-3.2-90B-Vision-bnb-4bit",
+
+    "unsloth/Pixtral-12B-2409-bnb-4bit",              # Pixtral fits in 16GB!
+    "unsloth/Pixtral-12B-Base-2409-bnb-4bit",         # Pixtral base model
+
+    "unsloth/Qwen2-VL-2B-Instruct-bnb-4bit",          # Qwen2 VL support
+    "unsloth/Qwen2-VL-7B-Instruct-bnb-4bit",
+    "unsloth/Qwen2-VL-72B-Instruct-bnb-4bit",
+
+    "unsloth/llava-v1.6-mistral-7b-hf-bnb-4bit",      # Any Llava variant works!
+    "unsloth/llava-1.5-7b-hf-bnb-4bit",
+] # More models at https://huggingface.co/unsloth
+
+model, tokenizer = FastVisionModel.from_pretrained(
+    "unsloth/Llama-3.2-11B-Vision-Instruct",
+    load_in_4bit = True, # Use 4bit to reduce memory use. False for 16bit LoRA.
+    use_gradient_checkpointing = "unsloth", # True or "unsloth" for long context
+)
+
+model = FastVisionModel.get_peft_model(
+    model,
+    finetune_vision_layers     = True, # False if not finetuning vision layers
+    finetune_language_layers   = True, # False if not finetuning language layers
+    finetune_attention_modules = True, # False if not finetuning attention layers
+    finetune_mlp_modules       = True, # False if not finetuning MLP layers
+
+    r = 16,           # The larger, the higher the accuracy, but might overfit
+    lora_alpha = 16,  # Recommended alpha == r at least
+    lora_dropout = 0,
+    bias = "none",
+    random_state = 3407,
+    use_rslora = False,  # We support rank stabilized LoRA
+    loftq_config = None, # And LoftQ
+    # target_modules = "all-linear", # Optional now! Can specify a list if needed
+)
+
+instruction = "Caption this image in less than 25 words"
+
+def convert_to_conversation(sample):
+    conversation = [
+        { "role": "user",
+          "content" : [
+            {"type" : "text",  "text"  : instruction},
+            {"type" : "image", "image" : sample["image"]} ]
+        },
+        { "role" : "assistant",
+          "content" : [
+            {"type" : "text",  "text"  : sample["caption"]} ]
+        },
+    ]
+    return { "messages" : conversation }
+
+converted_dataset = []
+for image_path, captions in train_data.items():
+  for caption in captions:
+    # Create a dictionary in the format expected by convert_to_conversation
+    sample = {"image": image_path, "caption": caption}
+    converted_dataset.append(convert_to_conversation(sample))
+
+if(v>1.0):
+    converted_dataset = []
+    for image_path, captions in train_data.items():
+        for caption in captions:
+            # Create a dictionary in the format expected by convert_to_conversation
+            sample = {"image": image_path, "caption": caption}
+            converted_dataset.append(convert_to_conversation(sample))
+
+    FastVisionModel.for_training(model) # Enable for training!
+    trainer = SFTTrainer(
+        model = model,
+        tokenizer = tokenizer,
+        data_collator = UnslothVisionDataCollator(model, tokenizer), # Must use!
+        train_dataset = converted_dataset,
+        args = SFTConfig(
+            per_device_train_batch_size = 2,
+            gradient_accumulation_steps = 4,
+            warmup_steps = 5,
+            max_steps = 30,
+            # num_train_epochs = 1, # Set this instead of max_steps for full training runs
+            learning_rate = 2e-4,
+            logging_steps = 1,
+            optim = "adamw_8bit",
+            weight_decay = 0.01,
+            lr_scheduler_type = "linear",
+            seed = 3407,
+            output_dir = "outputs",
+            report_to = "none",     # For Weights and Biases
+
+            # You MUST put the below items for vision finetuning:
+            remove_unused_columns = False,
+            dataset_text_field = "",
+            dataset_kwargs = {"skip_prepare_dataset": True},
+            max_seq_length = 2048,
+        ),
+    )
+    trainer_stats = trainer.train()
+    
+    model.push_to_hub("sindsub/llama3.2_11b_flickr8k_lora_model_"+str(v), token = "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") # Online saving
+    tokenizer.push_to_hub("sindsub/llama3.2_11b_flickr8k_lora_model_"+str(v), token = "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") # Online saving
+    
+    FastVisionModel.for_inference(model) # Enable for inference!
+
+    image = train_data[0]["image"]
+    instruction = "Caption this image in less than 25 words"
+
+    messages = [
+        {"role": "user", "content": [
+            {"type": "image"},
+            {"type": "text", "text": instruction}
+        ]}
+    ]
+    input_text = tokenizer.apply_chat_template(messages, add_generation_prompt = True)
+    inputs = tokenizer(
+        image,
+        input_text,
+        add_special_tokens = False,
+        return_tensors = "pt",
+    ).to("cuda")
+    text_streamer = TextStreamer(tokenizer, skip_prompt = True)
+    _ = model.generate(**inputs, streamer = text_streamer, max_new_tokens = 128,
+                    use_cache = True, temperature = 1.5, min_p = 0.1)
+    output = " ".join(_)
+    print(output)
 
 # Data augmentation for image data
 image_augmentation = keras.Sequential(
@@ -583,36 +762,12 @@ class LRSchedule(keras.optimizers.schedules.LearningRateSchedule):
             "post_warmup_learning_rate": self.post_warmup_learning_rate,
             "warmup_steps": self.warmup_steps,
         }
-'''
-cnn_model = get_cnn_model()
-encoder = TransformerEncoderBlock(embed_dim=EMBED_DIM, dense_dim=FF_DIM, num_heads=1)
-decoder = TransformerDecoderBlock(embed_dim=EMBED_DIM, ff_dim=FF_DIM, num_heads=2)
-
-reloaded_model = ImageCaptioningModel(
-    cnn_model=cnn_model,
-    encoder=encoder,
-    decoder=decoder,
-    image_aug=image_augmentation
-)
-'''
-#command_6 = 'unzip -qq ' + str(ROOT) + "/" + 'ic_model.zip -d ' + str(ROOT) + "/"
-#os.system(command_6)
-#reload_path = str(ROOT / "ic__model_output_v0.0.1.keras")
-#reloaded_model = tf.keras.models.load_model(reload_path)
-
-#reloaded_model = from_pretrained_keras("sindsub/ic_model")
-#reloaded_model = tf.saved_model.load(reload_path)
 
 # Create a learning rate schedule
 num_train_steps = len(train_dataset) * EPOCHS
 num_warmup_steps = num_train_steps // 15
 lr_schedule = LRSchedule(post_warmup_learning_rate=1e-4, warmup_steps=num_warmup_steps)
 caption_model.compile(optimizer=keras.optimizers.Adam(lr_schedule), loss=cross_entropy)
-
-#sess = tf.Session()
-#sess.run(it.initializer)
-#sess.run(tf.tables_initializer()) 
-#tf.keras.backend.set_session(sess)
 
 # Fit the model
 caption_model.fit(
@@ -689,17 +844,6 @@ def clean_results(results):
     return ""
 
 def inference(image, prompt, temp=0.5):
-    """
-    Performs inference using Google Gemini 2.5 Pro Experimental model.
-
-    Args:
-        image (str or genai.types.Blob): The image input, either as a base64-encoded string or Blob object.
-        prompt (str): A text prompt to guide the model's response.
-        temp (float, optional): Sampling temperature for response randomness. Default is 0.5.
-
-    Returns:
-        str: The text response generated by the Gemini model based on the prompt and image.
-    """
     response = client.models.generate_content(
         model="gemini-2.5-flash-preview-05-20",  # or "gemini-2.5-pro-exp-03-25"
         contents=[prompt, image],  # Provide both the text prompt and image as input
@@ -738,7 +882,7 @@ def yolo_result(image, caption_us):
         print("Exception, possibly exhausted tokens")
     return yolo_res, yolo_gemini_caption
 
-def run_rlmf(image, question):
+def run_rlmf(image):
     if image is None:
         print("No image provided.Selecting random")
         image = np.random.choice(list_of_v_images)
