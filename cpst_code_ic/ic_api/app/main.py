@@ -1,4 +1,5 @@
 import sys
+import gradio as gr
 from pathlib import Path
 file = Path(__file__).resolve()
 parent, root = file.parent, file.parents[1]
@@ -10,7 +11,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import tensorflow as tf
-from app.api import api_router
+from app.api import api_router, run_rlmf
 from app.config import settings
 import uvicorn
 
@@ -50,6 +51,23 @@ if settings.BACKEND_CORS_ORIGINS:
         allow_headers=["*"],
     )
 
+input_img = gr.Image(label="Input Picture")
+output_img = gr.Image(label="Image")
+caption_us = gr.Textbox(label="Model under evaluation")
+yolo_res = gr.Textbox(label="Yolo result")
+yolo_gemini_caption = gr.Textbox(label="Caption suggestion from expert model")
+
+# Create Gradio interface object
+iface = gr.Interface(fn = run_rlmf,
+                         inputs = [input_img],
+                         outputs = [output_img, caption_us, yolo_res, yolo_gemini_caption],
+                         title="Real or Kidding",
+                         description="YOLO/Gemini Feedback",
+                         allow_flagging='never',
+                         )
+
+# Mount gradio interface object on FastAPI app at endpoint = '/'
+app = gr.mount_gradio_app(app, iface, path="/")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001) 
