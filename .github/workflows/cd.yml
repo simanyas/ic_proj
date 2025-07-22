@@ -14,4 +14,4 @@ jobs:
     - name: Delete Old Docker Container
       run: sudo docker rm -f ic-container || true
     - name: Run Docker Container
-      run: sudo docker run -it -d -p 8001:8001 --name ic-container ${{secrets.DOCKER_UNAME}}/ic:latest
+      run: sudo docker run -it -v ~/code/ic_proj/cpst_code_ic/ic_api:ic_api -d -p 8001:8001 --name ic-container ${{secrets.DOCKER_UNAME}}/ic:latest
