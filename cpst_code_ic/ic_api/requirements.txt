@@ -5,7 +5,6 @@ pydantic
 pydantic-settings
 tensorflow>=2.16.2
 tensorflow-probability
-tf-models-official
 huggingface_hub
 gradio
 google-genai

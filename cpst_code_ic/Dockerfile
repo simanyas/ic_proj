@@ -9,9 +9,9 @@ WORKDIR /ic_api
 
 # update pip
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
-
+RUN apt-get update && apt-get install -y build-essential
 # install dependencies
-RUN pip install -r requirements.txt || true
+RUN pip install -r requirements.txt
 
 EXPOSE 7860
 ENV GRADIO_SERVER_NAME="0.0.0.0"
