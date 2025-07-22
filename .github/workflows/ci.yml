@@ -27,7 +27,8 @@ jobs:
         sudo docker login -u ${{secrets.DOCKER_UNAME}} -p ${{secrets.DOCKER}}
     - name: Build container
       run: |
-        sudo docker build --no-cache -t ${{secrets.DOCKER_UNAME}}/ic .
+        cd cpst_code_ic/
+        sudo docker build . --no-cache -t ${{secrets.DOCKER_UNAME}}/ic
         sudo docker images
     - name: Push to Docker hub
       run: |
