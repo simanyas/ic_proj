@@ -28,8 +28,8 @@ jobs:
     - name: Build container
       run: |
         cd cpst_code_ic/
-        sudo docker build . --no-cache -t ${{secrets.DOCKER_UNAME}}/ic
+        sudo docker build . --no-cache -t ${{secrets.DOCKER_UNAME}}/ic_p
         sudo docker images
     - name: Push to Docker hub
       run: |
-        sudo docker push ${{secrets.DOCKER_UNAME}}/ic:latest
+        sudo docker push ${{secrets.DOCKER_UNAME}}/ic_p:latest
