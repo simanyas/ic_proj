@@ -1,7 +1,6 @@
 uvicorn>=0.16.0,<0.18.0
 fastapi>=0.64.0,<1.0.0
 requests>=2.23.0
-torch
 pydantic
 pydantic-settings
 tensorflow>=2.16.2
@@ -14,7 +13,6 @@ ultralytics
 unsloth
 bitsandbytes 
 accelerate 
-xformers==0.0.29.post3 
 peft 
 trl
 unsloth_zoo
@@ -24,6 +22,7 @@ datasets>=3.4.1,<4.0.0
 huggingface_hub 
 hf_transfer
 spaces
+torch
 
 # Directly using keras file instead of whl
 #ic_model-0.0.1-py3-none-any.whl
