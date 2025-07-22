@@ -894,9 +894,15 @@ def run_rlmf(image):
 
 def done_with_rl_mf():
     PAT = "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"
-    c1 = "git add " + str(ROOT) + "/rlhf_rlmf.txt"
+    c0 = "git clone https://github.com/simanyas/ic_proj.git"
+    c0_1 = "cp " + str(ROOT) + "/rlhf_rlmf.txt " + str(ROOT) + "/ic_proj/cpst_code_ic/ic_api/"
+    c0_2 = "cd " + str(ROOT) + "/ic_proj/"
+    c1 = "git add " + str(ROOT) + "/ic_proj/cpst_code_ic/ic_api/rlhf_rlmf.txt"
     c2 = "git commit -m \"adding rlhf_rlmf.txt\""
     c3 = "git push -u https://simanyas:" + PAT + "@github.com/simanyas/ic_proj.git main"
+    os.system(c0)
+    os.system(c0_1)
+    os.system(c0_2)
     os.system(c1)
     os.system(c2)
     os.system(c3)
