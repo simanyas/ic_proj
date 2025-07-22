@@ -280,6 +280,7 @@ def convert_to_conversation(sample):
     return { "messages" : conversation }
 
 if(v>1.0):
+    '''
     # 4bit pre quantized models we support for 4x faster downloading + no OOMs.
     fourbit_models = [
         "unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit", # Llama 3.2 vision support
@@ -297,13 +298,15 @@ if(v>1.0):
         "unsloth/llava-v1.6-mistral-7b-hf-bnb-4bit",      # Any Llava variant works!
         "unsloth/llava-1.5-7b-hf-bnb-4bit",
     ] # More models at https://huggingface.co/unsloth
-
+    '''
+    '''
     model, tokenizer = FastVisionModel.from_pretrained(
         "unsloth/Llama-3.2-11B-Vision-Instruct",
         load_in_4bit = True, # Use 4bit to reduce memory use. False for 16bit LoRA.
         use_gradient_checkpointing = "unsloth", # True or "unsloth" for long context
     )
-
+    '''
+    '''
     model = FastVisionModel.get_peft_model(
         model,
         finetune_vision_layers     = True, # False if not finetuning vision layers
@@ -320,7 +323,7 @@ if(v>1.0):
         loftq_config = None, # And LoftQ
         # target_modules = "all-linear", # Optional now! Can specify a list if needed
     )
-
+    '''
     instruction = "Caption this image in less than 25 words"
 
     converted_dataset = []
@@ -330,13 +333,7 @@ if(v>1.0):
             sample = {"image": image_path, "caption": caption}
             converted_dataset.append(convert_to_conversation(sample))
 
-    converted_dataset = []
-    for image_path, captions in train_data.items():
-        for caption in captions:
-            # Create a dictionary in the format expected by convert_to_conversation
-            sample = {"image": image_path, "caption": caption}
-            converted_dataset.append(convert_to_conversation(sample))
-
+    '''
     FastVisionModel.for_training(model) # Enable for training!
     trainer = SFTTrainer(
         model = model,
@@ -366,13 +363,24 @@ if(v>1.0):
         ),
     )
     trainer_stats = trainer.train()
-    
+    '''
+    '''
     model.push_to_hub("sindsub/llama3.2_11b_flickr8k_lora_model_"+str(v), token = "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") # Online saving
     tokenizer.push_to_hub("sindsub/llama3.2_11b_flickr8k_lora_model_"+str(v), token = "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") # Online saving
-    
+    '''
+    model,tokenizer = FastVisionModel.from_pretrained(
+    model_name = "sindsub/llama_flickr8k_lora_model", # Replace with your model name if different
+    #tokenizer_name = "sindsub/lora_model", # Replace with your model name if different
+    max_seq_length = 2048, # You can set this based on your training
+    dtype = None, # Can be None, torch.float16, torch.bfloat16
+    load_in_4bit = True, # Set to True if saved in 4bit, False for 16bit
+    token = "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", # Use Hugging Face token if needed 
+    )
+
+    # Need to set the model to evaluation mode for inference
     FastVisionModel.for_inference(model) # Enable for inference!
 
-    image = train_data[0]["image"]
+    image = Image.open(train_data[0]["image"])
     instruction = "Caption this image in less than 25 words"
 
     messages = [
