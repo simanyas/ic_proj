@@ -8,13 +8,9 @@ tensorflow-probability
 huggingface_hub
 gradio
 google-genai
-ultralytics
 unsloth
 bitsandbytes 
-accelerate 
-peft 
-trl
-unsloth_zoo
+accelerate
 sentencepiece
 protobuf 
 datasets>=3.4.1,<4.0.0 
@@ -22,6 +18,11 @@ huggingface_hub
 hf_transfer
 spaces
 torch
+ultralytics
+
 
 # Directly using keras file instead of whl
 #ic_model-0.0.1-py3-none-any.whl
+
+# If uploded your package in PyPI then use the given below
+#bikeshare-model==0.0.1
